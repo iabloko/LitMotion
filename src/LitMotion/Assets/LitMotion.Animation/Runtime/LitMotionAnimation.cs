@@ -6,45 +6,128 @@ using UnityEngine;
 namespace LitMotion.Animation
 {
     [AddComponentMenu("LitMotion Animation")]
-    public sealed class LitMotionAnimation : MonoBehaviour, ISerializationCallbackReceiver
+    public sealed class LitMotionAnimation : MonoBehaviour
     {
-        enum AutoPlayMode
-        {
-            None,
-            OnStart,
-            OnEnable
-        }
-
         enum AnimationMode
         {
             Parallel,
             Sequential
         }
 
-        [SerializeField] AutoPlayMode autoPlayMode = AutoPlayMode.OnStart;
+        [SerializeField] bool playOnAwake = true;
         [SerializeField] AnimationMode animationMode;
 
         [SerializeReference]
         LitMotionAnimationComponent[] components;
 
-        readonly Queue<LitMotionAnimationComponent> queue = new();
+        Queue<LitMotionAnimationComponent> queue = new();
         FastListCore<LitMotionAnimationComponent> playingComponents;
-
-        [HideInInspector, SerializeField] bool playOnAwake = true;
-        [HideInInspector, SerializeField] int version;
 
         public IReadOnlyList<LitMotionAnimationComponent> Components => components;
 
-        void OnEnable()
-        {
-            if (autoPlayMode == AutoPlayMode.OnEnable)
-                Play();
-        }
-
         void Start()
         {
-            if (autoPlayMode == AutoPlayMode.OnStart)
-                Play();
+            if (playOnAwake) Play();
+        }
+        
+        public void Reverse()
+        {
+            var hasActive = false;
+        
+            foreach (var component in playingComponents.AsSpan())
+            {
+                var handle = component.TrackedHandle;
+                if (!handle.IsActive()) continue;
+        
+                handle.Time = handle.Delay + handle.Duration;
+        
+                handle.PlaybackSpeed = -1f;
+                component.OnResume();
+                hasActive = true;
+            }
+            
+            if (hasActive) return;
+        
+            playingComponents.Clear();
+            queue.Clear();
+        
+            switch (animationMode)
+            {
+                case AnimationMode.Sequential:
+                    
+                    for (int i = components.Length - 1; i >= 0; i--)
+                    {
+                        var c = components[i];
+                        if (c == null) continue;
+                        if (!c.Enabled) continue;
+                        queue.Enqueue(c);
+                    }
+        
+                    MoveNextMotionReverse();
+                    break;
+        
+                case AnimationMode.Parallel:
+                    foreach (var component in components)
+                    {
+                        if (component == null) continue;
+                        if (!component.Enabled) continue;
+        
+                        try
+                        {
+                            var handle = component.Play();
+                            component.TrackedHandle = handle;
+        
+                            if (handle.IsActive())
+                            {
+                                handle.Time = handle.Delay + handle.Duration;
+                                handle.PlaybackSpeed = -1f;
+        
+                                handle.Preserve();
+                            }
+        
+                            playingComponents.Add(component);
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.LogException(ex);
+                        }
+                    }
+                    break;
+            }
+        }
+
+        void MoveNextMotionReverse()
+        {
+            if (queue.TryDequeue(out var queuedComponent))
+            {
+                try
+                {
+                    var handle = queuedComponent.Play();
+                    var isActive = handle.IsActive();
+        
+                    if (isActive)
+                    {
+                        handle.Preserve();
+                
+                        handle.Time = handle.Delay + handle.Duration;
+                        handle.PlaybackSpeed = -1f;
+        
+                        MotionManager.GetManagedDataRef(handle, false).OnCompleteAction += MoveNextMotionReverse;
+                    }
+        
+                    queuedComponent.TrackedHandle = handle;
+                    playingComponents.Add(queuedComponent);
+        
+                    if (!isActive)
+                    {
+                        MoveNextMotionReverse();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogException(ex);
+                }
+            }
         }
 
         void MoveNextMotion()
@@ -203,26 +286,9 @@ namespace LitMotion.Animation
             }
         }
 
-        void OnDisable()
-        {
-            if (autoPlayMode == AutoPlayMode.OnEnable)
-                Stop();
-        }
-
         void OnDestroy()
         {
             Stop();
-        }
-
-        void ISerializationCallbackReceiver.OnBeforeSerialize() { }
-
-        void ISerializationCallbackReceiver.OnAfterDeserialize()
-        {
-            if (version < 1)
-            {
-                autoPlayMode = playOnAwake ? AutoPlayMode.OnStart : AutoPlayMode.None;
-                version = 1;
-            }
         }
     }
 }
